@@ -24,6 +24,118 @@ import { WorkflowValidator } from '../services/workflow-validator';
 import { EnhancedConfigValidator } from '../services/enhanced-config-validator';
 import { NodeRepository } from '../database/node-repository';
 
+// 백엔드 API 호출 함수 (API 키 기반 인증)
+async function registerWorkflowInBackend(userApiKey: string, n8nWorkflowId: string, workflowName: string): Promise<void> {
+  const backendUrl = process.env.BACKEND_API_URL || 'http://localhost:8000';
+  
+  console.log(`[MCP DEBUG] 백엔드에 워크플로우 등록 시도: ${backendUrl}/api/workflows`);
+  console.log(`[MCP DEBUG] API 키: ${userApiKey ? userApiKey.substring(0, 8) + '...' : '없음'}`);
+  console.log(`[MCP DEBUG] n8n 워크플로우 ID: ${n8nWorkflowId}`);
+  
+  try {
+    const response = await fetch(`${backendUrl}/api/workflows`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-Key': userApiKey
+      },
+      body: JSON.stringify({
+        workflow_id: n8nWorkflowId,
+        name: workflowName
+      })
+    });
+
+    console.log(`[MCP DEBUG] 백엔드 응답 상태: ${response.status} ${response.statusText}`);
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ detail: 'Unknown error' }));
+      console.log(`[MCP DEBUG] 백엔드 에러 응답:`, errorData);
+      const detail = (errorData as any)?.detail || response.statusText;
+      throw new Error(`Backend API error: ${detail}`);
+    }
+    
+    const successData = await response.json();
+    console.log(`[MCP DEBUG] 백엔드 등록 성공:`, successData);
+  } catch (error) {
+    console.log(`[MCP DEBUG] 백엔드 등록 실패:`, error);
+    logger.error('Failed to register workflow in backend:', error);
+    // 백엔드 등록 실패해도 n8n 워크플로우는 성공적으로 생성되었으므로 에러를 던지지 않음
+    // 대신 로그만 남김
+  }
+}
+
+// 백엔드 워크플로우 소유권 확인 함수
+async function verifyWorkflowOwnership(userApiKey: string, workflowId: string): Promise<boolean> {
+  const backendUrl = process.env.BACKEND_API_URL || 'http://localhost:8000';
+  
+  console.log(`[MCP DEBUG] 백엔드에 워크플로우 소유권 확인 요청: ${backendUrl}/api/workflows/verify`);
+  console.log(`[MCP DEBUG] API 키: ${userApiKey ? userApiKey.substring(0, 8) + '...' : '없음'}`);
+  console.log(`[MCP DEBUG] 워크플로우 ID: ${workflowId}`);
+  
+  try {
+    const response = await fetch(`${backendUrl}/api/workflows/verify`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-Key': userApiKey
+      },
+      body: JSON.stringify({
+        workflow_id: workflowId
+      })
+    });
+
+    console.log(`[MCP DEBUG] 백엔드 응답 상태: ${response.status} ${response.statusText}`);
+
+    if (!response.ok) {
+      console.log(`[MCP DEBUG] 백엔드 소유권 확인 실패: ${response.status}`);
+      return false;
+    }
+    
+    const result = await response.json() as { verified?: boolean };
+    console.log(`[MCP DEBUG] 백엔드 소유권 확인 결과:`, result);
+    return result.verified === true;
+  } catch (error) {
+    console.log(`[MCP DEBUG] 백엔드 소유권 확인 오류:`, error);
+    return false;
+  }
+}
+
+// 백엔드 워크플로우 삭제 함수
+async function deleteWorkflowInBackend(userApiKey: string, workflowId: string): Promise<boolean> {
+  const backendUrl = process.env.BACKEND_API_URL || 'http://localhost:8000';
+  
+  console.log(`[MCP DEBUG] 백엔드에 워크플로우 삭제 요청: ${backendUrl}/api/workflows/delete`);
+  console.log(`[MCP DEBUG] API 키: ${userApiKey ? userApiKey.substring(0, 8) + '...' : '없음'}`);
+  console.log(`[MCP DEBUG] 워크플로우 ID: ${workflowId}`);
+  
+  try {
+    const response = await fetch(`${backendUrl}/api/workflows/delete`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-Key': userApiKey
+      },
+      body: JSON.stringify({
+        workflow_id: workflowId
+      })
+    });
+
+    console.log(`[MCP DEBUG] 백엔드 응답 상태: ${response.status} ${response.statusText}`);
+
+    if (!response.ok) {
+      console.log(`[MCP DEBUG] 백엔드 워크플로우 삭제 실패: ${response.status}`);
+      return false;
+    }
+    
+    const result = await response.json() as { deleted?: boolean };
+    console.log(`[MCP DEBUG] 백엔드 워크플로우 삭제 결과:`, result);
+    return result.deleted === true;
+  } catch (error) {
+    console.log(`[MCP DEBUG] 백엔드 워크플로우 삭제 오류:`, error);
+    return false;
+  }
+}
+
 // Singleton n8n API client instance
 let apiClient: N8nApiClient | null = null;
 let lastConfigUrl: string | null = null;
@@ -64,7 +176,21 @@ function ensureApiConfigured(): N8nApiClient {
 const createWorkflowSchema = z.object({
   name: z.string(),
   nodes: z.array(z.any()),
-  connections: z.record(z.any()),
+  connections: z.union([
+    z.record(z.any()), // 객체로 직접 전달된 경우
+    z.string().transform((str, ctx) => { // JSON 문자열로 전달된 경우
+      try {
+        return JSON.parse(str);
+      } catch (error) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'connections must be a valid JSON object or object',
+        });
+        return z.NEVER;
+      }
+    })
+  ]),
+  api_key: z.string(), // 사용자 API 키 추가
   settings: z.object({
     executionOrder: z.enum(['v0', 'v1']).optional(),
     timezone: z.string().optional(),
@@ -79,6 +205,7 @@ const createWorkflowSchema = z.object({
 
 const updateWorkflowSchema = z.object({
   id: z.string(),
+  api_key: z.string(),
   name: z.string().optional(),
   nodes: z.array(z.any()).optional(),
   connections: z.record(z.any()).optional(),
@@ -86,6 +213,7 @@ const updateWorkflowSchema = z.object({
 });
 
 const listWorkflowsSchema = z.object({
+  api_key: z.string(),
   limit: z.number().min(1).max(100).optional(),
   cursor: z.string().optional(),
   active: z.boolean().optional(),
@@ -127,9 +255,10 @@ export async function handleCreateWorkflow(args: unknown): Promise<McpToolRespon
   try {
     const client = ensureApiConfigured();
     const input = createWorkflowSchema.parse(args);
+    const { api_key, ...workflowData } = input;
     
     // Validate workflow structure
-    const errors = validateWorkflowStructure(input);
+    const errors = validateWorkflowStructure(workflowData);
     if (errors.length > 0) {
       return {
         success: false,
@@ -138,8 +267,15 @@ export async function handleCreateWorkflow(args: unknown): Promise<McpToolRespon
       };
     }
     
-    // Create workflow
-    const workflow = await client.createWorkflow(input);
+    // Create workflow in n8n
+    const workflow = await client.createWorkflow(workflowData);
+    
+    // Register workflow in backend database
+    if (workflow.id) {
+      await registerWorkflowInBackend(api_key, workflow.id, workflow.name || 'Untitled Workflow');
+    } else {
+      console.log(`[MCP DEBUG] 워크플로우 ID가 없어서 백엔드 등록을 건너뜁니다`);
+    }
     
     return {
       success: true,
@@ -358,7 +494,17 @@ export async function handleUpdateWorkflow(args: unknown): Promise<McpToolRespon
   try {
     const client = ensureApiConfigured();
     const input = updateWorkflowSchema.parse(args);
-    const { id, ...updateData } = input;
+    const { id, api_key, ...updateData } = input;
+    
+    // 워크플로우 소유권 확인
+    const isVerified = await verifyWorkflowOwnership(api_key, id);
+    if (!isVerified) {
+      return {
+        success: false,
+        error: '본인의 워크플로우가 아니라 업데이트 할 수 없습니다.',
+        details: { workflowId: id }
+      };
+    }
     
     // If nodes/connections are being updated, validate the structure
     if (updateData.nodes || updateData.connections) {
@@ -419,8 +565,22 @@ export async function handleUpdateWorkflow(args: unknown): Promise<McpToolRespon
 export async function handleDeleteWorkflow(args: unknown): Promise<McpToolResponse> {
   try {
     const client = ensureApiConfigured();
-    const { id } = z.object({ id: z.string() }).parse(args);
+    const { id, api_key } = z.object({ 
+      id: z.string(),
+      api_key: z.string()
+    }).parse(args);
     
+    // 백엔드에서 워크플로우 소유권 확인 및 삭제
+    const isDeleted = await deleteWorkflowInBackend(api_key, id);
+    if (!isDeleted) {
+      return {
+        success: false,
+        error: '본인의 워크플로우가 아니라 삭제할 수 없습니다.',
+        details: { workflowId: id }
+      };
+    }
+    
+    // 백엔드에서 삭제 성공했으면 n8n에서도 삭제
     await client.deleteWorkflow(id);
     
     return {
@@ -451,43 +611,99 @@ export async function handleDeleteWorkflow(args: unknown): Promise<McpToolRespon
   }
 }
 
+// 백엔드 사용자 워크플로우 목록 조회 함수
+async function getUserWorkflowsFromBackend(userApiKey: string, limit?: number): Promise<{id: string, name: string}[]> {
+  const backendUrl = process.env.BACKEND_API_URL || 'http://localhost:8000';
+  
+  console.log(`[MCP DEBUG] 백엔드에 사용자 워크플로우 목록 요청: ${backendUrl}/api/workflows`);
+  console.log(`[MCP DEBUG] API 키: ${userApiKey ? userApiKey.substring(0, 8) + '...' : '없음'}`);
+  
+  try {
+    const response = await fetch(`${backendUrl}/api/workflows`, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-Key': userApiKey
+      }
+    });
+
+    console.log(`[MCP DEBUG] 백엔드 응답 상태: ${response.status} ${response.statusText}`);
+
+    if (!response.ok) {
+      console.log(`[MCP DEBUG] 백엔드 워크플로우 목록 조회 실패: ${response.status}`);
+      return [];
+    }
+    
+    const result = await response.json() as { workflows?: {workflow_id: string, title: string}[] };
+    console.log(`[MCP DEBUG] 백엔드 워크플로우 목록 조회 결과:`, result);
+    
+    // 백엔드 형식을 n8n 형식으로 변환
+    const workflows = (result.workflows || []).map(wf => ({
+      id: wf.workflow_id,
+      name: wf.title
+    }));
+    
+    // limit 적용
+    return limit ? workflows.slice(0, limit) : workflows;
+  } catch (error) {
+    console.log(`[MCP DEBUG] 백엔드 워크플로우 목록 조회 오류:`, error);
+    return [];
+  }
+}
+
 export async function handleListWorkflows(args: unknown): Promise<McpToolResponse> {
   try {
-    const client = ensureApiConfigured();
     const input = listWorkflowsSchema.parse(args || {});
+    const { api_key, tags, limit, ...otherParams } = input;
     
-    const response = await client.listWorkflows({
-      limit: input.limit || 100,
-      cursor: input.cursor,
-      active: input.active,
-      tags: input.tags,
-      projectId: input.projectId,
-      excludePinnedData: input.excludePinnedData ?? true
-    });
-    
-    // Strip down workflows to only essential metadata
-    const minimalWorkflows = response.data.map(workflow => ({
-      id: workflow.id,
-      name: workflow.name,
-      active: workflow.active,
-      createdAt: workflow.createdAt,
-      updatedAt: workflow.updatedAt,
-      tags: workflow.tags || [],
-      nodeCount: workflow.nodes?.length || 0
-    }));
+    // 태그가 있으면 n8n에서 표준 워크플로우 조회
+    if (tags && tags.length > 0) {
+      console.log(`[MCP DEBUG] 태그가 있어서 n8n에서 표준 워크플로우 조회: ${tags}`);
+      const client = ensureApiConfigured();
+      
+      const response = await client.listWorkflows({
+        limit: limit || 100,
+        cursor: otherParams.cursor,
+        active: otherParams.active,
+        tags: tags.join(','), // 배열을 쉼표로 구분된 문자열로 변환
+        projectId: otherParams.projectId,
+        excludePinnedData: otherParams.excludePinnedData ?? true
+      } as any); // 타입 에러 방지를 위해 any로 캐스팅
+      
+      // Strip down workflows to only id and name
+      const minimalWorkflows = response.data.map(workflow => ({
+        id: workflow.id,
+        name: workflow.name
+      }));
 
-    return {
-      success: true,
-      data: {
-        workflows: minimalWorkflows,
-        returned: minimalWorkflows.length,
-        nextCursor: response.nextCursor,
-        hasMore: !!response.nextCursor,
-        ...(response.nextCursor ? { 
-          _note: "More workflows available. Use cursor to get next page." 
-        } : {})
-      }
-    };
+      return {
+        success: true,
+        data: {
+          workflows: minimalWorkflows,
+          returned: minimalWorkflows.length,
+          nextCursor: response.nextCursor,
+          hasMore: !!response.nextCursor,
+          ...(response.nextCursor ? { 
+            _note: "More workflows available. Use cursor to get next page." 
+          } : {})
+        }
+      };
+    } 
+    // 태그가 없으면 백엔드에서 사용자 워크플로우 조회
+    else {
+      console.log(`[MCP DEBUG] 태그가 없어서 백엔드에서 사용자 워크플로우 조회`);
+      const workflows = await getUserWorkflowsFromBackend(api_key, limit);
+      
+      return {
+        success: true,
+        data: {
+          workflows: workflows,
+          returned: workflows.length,
+          hasMore: false,
+          _note: "User workflows from backend"
+        }
+      };
+    }
   } catch (error) {
     if (error instanceof z.ZodError) {
       return {
