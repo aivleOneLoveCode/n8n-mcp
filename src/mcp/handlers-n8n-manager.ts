@@ -25,12 +25,12 @@ import { EnhancedConfigValidator } from '../services/enhanced-config-validator';
 import { NodeRepository } from '../database/node-repository';
 
 // 백엔드 API 호출 함수 (API 키 기반 인증)
-async function registerWorkflowInBackend(userApiKey: string, n8nWorkflowId: string, workflowName: string): Promise<void> {
+async function registerWorkflowInBackend(userApiKey: string, workflowId: string, workflowName: string): Promise<void> {
   const backendUrl = process.env.BACKEND_API_URL || 'http://localhost:8000';
   
   console.log(`[MCP DEBUG] 백엔드에 워크플로우 등록 시도: ${backendUrl}/api/workflows`);
   console.log(`[MCP DEBUG] API 키: ${userApiKey ? userApiKey.substring(0, 8) + '...' : '없음'}`);
-  console.log(`[MCP DEBUG] n8n 워크플로우 ID: ${n8nWorkflowId}`);
+  console.log(`[MCP DEBUG] 워크플로우 ID: ${workflowId}`);
   
   try {
     const response = await fetch(`${backendUrl}/api/workflows`, {
@@ -40,7 +40,7 @@ async function registerWorkflowInBackend(userApiKey: string, n8nWorkflowId: stri
         'X-API-Key': userApiKey
       },
       body: JSON.stringify({
-        workflow_id: n8nWorkflowId,
+        workflow_id: workflowId,
         name: workflowName
       })
     });
